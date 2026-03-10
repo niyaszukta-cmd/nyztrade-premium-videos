@@ -351,55 +351,66 @@ def save_video_meta(meta):
     with open(VIDEO_DIR / "metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
 
-def get_video_b64(path: Path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
-
 # ─── Protected Video Player ───────────────────────────────────────────────────
 def render_protected_video(video_path: Path, watermark_text: str):
-    ext = video_path.suffix.lower().lstrip(".")
-    mime = {"mp4": "video/mp4", "webm": "video/webm", "ogv": "video/ogg", "mov": "video/mp4"}.get(ext, "video/mp4")
-    b64 = get_video_b64(video_path)
-    src = f"data:{mime};base64,{b64}"
     ts = datetime.now().strftime("%d %b %Y %H:%M")
 
-    html = f"""
-    <div style="position:relative; width:100%; border-radius:12px; overflow:hidden;">
+    # Watermark overlay above the native player
+    st.markdown(f"""
+    <div style="
+      background:#0f172a; border-radius:12px 12px 0 0;
+      padding:10px 14px 6px; position:relative;
+      border:1px solid #1f2937; border-bottom:none;">
       <div style="
         position:absolute; top:50%; left:50%;
-        transform:translate(-50%,-50%) rotate(-25deg);
-        font-size:clamp(0.8rem,2.5vw,1.3rem);
-        color:rgba(245,158,11,0.15); font-weight:900;
-        pointer-events:none; z-index:500;
-        white-space:nowrap; letter-spacing:3px;
-        font-family:'Rajdhani',sans-serif;">
+        transform:translate(-50%,-50%) rotate(-20deg);
+        font-size:clamp(0.75rem,2vw,1.1rem);
+        color:rgba(245,158,11,0.13); font-weight:900;
+        pointer-events:none; white-space:nowrap;
+        letter-spacing:3px; font-family:'Rajdhani',sans-serif;">
         {watermark_text} | {ts}
       </div>
-      <div style="position:absolute;top:0;left:0;width:100%;height:100%;z-index:400;background:transparent;pointer-events:none;"></div>
-      <video id="nyz-player" controls
-        controlsList="nodownload nofullscreen noremoteplayback"
-        disablePictureInPicture disableRemotePlayback
-        style="width:100%;border-radius:12px;outline:none;display:block;"
-        oncontextmenu="return false;" playsinline webkit-playsinline>
-        <source src="{src}" type="{mime}">
-      </video>
+      <div style="color:#f59e0b;font-size:0.7rem;font-family:'Rajdhani',sans-serif;
+           letter-spacing:1px;text-align:right;">
+        🔒 {watermark_text}
+      </div>
     </div>
+    """, unsafe_allow_html=True)
+
+    # Streamlit native video player — streams file directly, works for any size
+    with open(video_path, "rb") as f:
+        video_bytes = f.read()
+    st.video(video_bytes)
+
+    # Anti-capture JS injected after player renders
+    st.components.v1.html("""
     <script>
-    (function(){{
-      var p = document.getElementById('nyz-player');
-      if (!p) return;
-      p.addEventListener('contextmenu', e => e.preventDefault());
-      document.addEventListener('visibilitychange', () => {{ if(document.hidden) p.pause(); }});
-      document.addEventListener('keyup', e => {{
-        if (e.key === 'PrintScreen') {{
-          p.pause(); p.style.filter='blur(20px)';
-          setTimeout(()=>{{ p.style.filter='none'; }}, 3000);
-        }}
-      }});
-    }})();
+    (function(){
+      function lockVideos() {
+        document.querySelectorAll('video').forEach(function(v) {
+          v.setAttribute('controlsList','nodownload nofullscreen noremoteplayback');
+          v.setAttribute('disablePictureInPicture','');
+          v.oncontextmenu = function(e){ e.preventDefault(); return false; };
+        });
+      }
+      lockVideos();
+      setTimeout(lockVideos, 1000);
+      setTimeout(lockVideos, 2500);
+
+      document.addEventListener('visibilitychange', function(){
+        if(document.hidden) document.querySelectorAll('video').forEach(v => v.pause());
+      });
+      document.addEventListener('keyup', function(e){
+        if(e.key==='PrintScreen'){
+          document.querySelectorAll('video').forEach(function(v){
+            v.pause(); v.style.filter='blur(20px)';
+            setTimeout(()=>{ v.style.filter='none'; }, 3000);
+          });
+        }
+      });
+    })();
     </script>
-    """
-    st.components.v1.html(html, height=420, scrolling=False)
+    """, height=0)
 
 # ─── Logo HTML ────────────────────────────────────────────────────────────────
 LOGO_HTML = f'<img src="data:image/jpeg;base64,{LOGO_B64}" style="height:40px;border-radius:8px;" alt="NYZTrade">'
@@ -472,7 +483,7 @@ def admin_panel(users):
         with col2:
             thumbnail_url = st.text_input("Thumbnail URL", placeholder="https://...")
 
-        st.info(f"📁 Videos are saved to: `{VIDEO_DIR.resolve()}/`")
+        st.info(f"📁 Videos saved to: `{VIDEO_DIR.resolve()}/`")
         uploaded = st.file_uploader(
             "Upload Video File (max 1 GB)",
             type=["mp4", "webm", "mov", "mkv"],
@@ -511,7 +522,7 @@ def admin_panel(users):
             st.info("No videos uploaded yet.")
         else:
             for vid_id, info in meta.items():
-                with st.expander(f"🎬 {info['title']}  —  {info.get('size_mb', '?')} MB"):
+                with st.expander(f"🎬 {info['title']}  —  {info.get('size_mb', '?')}" + " MB"):
                     st.write(f"**Category:** {info['category']}")
                     st.write(f"**Uploaded:** {info['uploaded_at'][:10]}  |  **By:** {info.get('uploader','admin')}")
                     st.write(f"**File:** `{info['filename']}`")
@@ -556,6 +567,7 @@ def admin_panel(users):
                     st.success(f"✅ User '{new_user}' added.")
                     st.rerun()
 
+
 # ─── Client View ──────────────────────────────────────────────────────────────
 def client_view():
     meta = get_video_list()
@@ -571,28 +583,36 @@ def client_view():
     if not filtered:
         st.markdown("""
         <div style="text-align:center;padding:3rem 1rem;color:#6b7280;">
-          🎬 <br>No videos available yet.<br>Check back soon!
+          🎬<br>No videos available yet.<br>Check back soon!
         </div>
         """, unsafe_allow_html=True)
         return
 
-    # Video grid – 2 cols on mobile
+    # Video grid — 2 columns (mobile-friendly)
     cols = st.columns(2)
     for i, (vid_id, info) in enumerate(filtered.items()):
         with cols[i % 2]:
-            thumb = info.get("thumbnail") or f"https://via.placeholder.com/320x180/0f172a/f59e0b?text=%E2%96%B6"
+            thumb = info.get("thumbnail", "").strip()
+            title_enc = info["title"].replace(" ", "+")
+            fallback = f"https://via.placeholder.com/320x180/0f172a/f59e0b?text=▶+{title_enc}"
+            thumb_src = thumb if thumb else fallback
+
             st.markdown(f"""
             <div class="vid-card">
-              <img class="vid-thumb" src="{thumb}" onerror="this.src='https://via.placeholder.com/320x180/0f172a/f59e0b?text=%E2%96%B6'" />
-              <div class="cat-pill">{info['category']}</div>
-              <div class="vid-title">{info['title']}</div>
-              <div class="vid-meta">{info.get('size_mb','?')} MB · {info['uploaded_at'][:10]}</div>
+              <img class="vid-thumb"
+                src="{thumb_src}"
+                onerror="this.src='{fallback}'"
+              />
+              <div class="cat-pill">{info["category"]}</div>
+              <div class="vid-title">{info["title"]}</div>
+              <div class="vid-meta">{info.get("size_mb","?")} MB · {info["uploaded_at"][:10]}</div>
             </div>
             """, unsafe_allow_html=True)
             if st.button("▶ Watch", key=f"watch_{vid_id}", use_container_width=True):
                 st.session_state["active_video"] = vid_id
+                st.rerun()
 
-    # Player
+    # ── Player ──
     if "active_video" in st.session_state:
         vid_id = st.session_state["active_video"]
         if vid_id in meta:
@@ -601,8 +621,11 @@ def client_view():
             st.divider()
             st.markdown(f"""
             <div style="margin-bottom:0.5rem;">
-              <div style="font-family:'Rajdhani',sans-serif;font-size:1.2rem;font-weight:700;color:#f59e0b;">{info['title']}</div>
-              <div style="color:#6b7280;font-size:0.75rem;">{info['category']} · {info.get('size_mb','?')} MB · {info['uploaded_at'][:10]}</div>
+              <div style="font-family:'Rajdhani',sans-serif;font-size:1.2rem;
+                          font-weight:700;color:#f59e0b;">{info["title"]}</div>
+              <div style="color:#6b7280;font-size:0.75rem;">
+                {info["category"]} · {info.get("size_mb","?")} MB · {info["uploaded_at"][:10]}
+              </div>
             </div>
             """, unsafe_allow_html=True)
             if video_path.exists():
@@ -613,7 +636,8 @@ def client_view():
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.error("Video file not found. Please contact support.")
+                st.error("⚠️ Video file not found on server. Please contact support.")
+
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
@@ -626,7 +650,7 @@ def main():
 
     render_header()
 
-    # Logout row
+    # Logout
     _, col_out = st.columns([8, 2])
     with col_out:
         if st.button("🚪 Logout", use_container_width=True):
@@ -646,6 +670,7 @@ def main():
       NYZTrade | {st.session_state.get('username','').upper()} | {st.session_state.get('session_id','')}
     </div>
     """, unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()
