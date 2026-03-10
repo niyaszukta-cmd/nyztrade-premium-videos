@@ -41,14 +41,21 @@ html, body {
   font-family: 'DM Sans', sans-serif;
   -webkit-tap-highlight-color: transparent;
   overflow-x: hidden;
+  overflow-y: auto;
+  height: auto;
 }
 
 /* ── Hide Streamlit chrome ── */
 #MainMenu, footer, header, .stDeployButton { visibility: hidden !important; }
 .block-container {
-  padding: 0.5rem 1rem 3rem !important;
-  max-width: 1400px !important;
-  margin: 0 auto !important;
+  padding: 0.5rem 1rem 4rem !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+}
+/* Ensure the main content area never clips scroll */
+section[data-testid="stMain"] > div:first-child {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
 }
 [data-testid="stSidebarNav"] { display: none; }
 
@@ -367,7 +374,7 @@ html, body {
 
 /* ── Desktop layout: sidebar-like admin columns ── */
 @media (min-width: 768px) {
-  .block-container { padding: 0.75rem 2rem 3rem !important; }
+  .block-container { padding: 0.75rem 2rem 5rem !important; max-width: 100% !important; }
   .nyz-header { padding: 12px 24px; }
   .login-card { padding: 3rem 2.5rem; }
 }
@@ -377,6 +384,20 @@ html, body {
 ::-webkit-scrollbar-track { background: #050c18; }
 ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #2d4a6e; }
+
+/* ── Scroll fix: prevent Streamlit containers from clipping content ── */
+section[data-testid="stMain"],
+section[data-testid="stMain"] > div,
+.main > div,
+[data-testid="stAppViewContainer"] > section {
+  overflow: visible !important;
+  height: auto !important;
+}
+/* The actual scroll lives on the window/body — never clip it */
+[data-testid="stAppViewContainer"] {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
 
 /* ── Divider ── */
 hr { border-color: #1e3a5f !important; }
@@ -571,10 +592,19 @@ body{{background:#050c18;font-family:sans-serif}}
 
   document.addEventListener('contextmenu', function(e){{e.preventDefault();}});
   document.addEventListener('dragstart',   function(e){{e.preventDefault();}});
+
+  /* Auto-resize: tell parent iframe our actual height */
+  function reportHeight() {{
+    var h = document.documentElement.scrollHeight || document.body.scrollHeight;
+    window.parent.postMessage({{type:'streamlit:setFrameHeight', height:h}}, '*');
+  }}
+  window.addEventListener('load', reportHeight);
+  window.addEventListener('resize', reportHeight);
+  setTimeout(reportHeight, 300);
 }})();
 </script>
 </body></html>"""
-    st.components.v1.html(html, height=530, scrolling=False)
+    st.components.v1.html(html, height=600, scrolling=False)
 
 # ─── Shared UI ────────────────────────────────────────────────────────────────
 def render_header():
