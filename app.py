@@ -472,14 +472,15 @@ def admin_panel(users):
         with col2:
             thumbnail_url = st.text_input("Thumbnail URL", placeholder="https://...")
 
+        st.info(f"📁 Videos are saved to: `{VIDEO_DIR.resolve()}/`")
         uploaded = st.file_uploader(
-            "Upload Video File",
+            "Upload Video File (max 1 GB)",
             type=["mp4", "webm", "mov", "mkv"],
-            help="MP4, WebM, MOV, MKV – HD/4K supported up to 2GB"
+            help="Supports MP4, WebM, MOV, MKV – HD/4K up to 1 GB per file"
         )
 
         if uploaded and not title:
-            st.warning("⚠️ Please fill in the **Video Title** to enable saving.")
+            st.warning("⚠️ Please fill in the **Video Title** above to enable saving.")
 
         if uploaded:
             if st.button("💾 Save Video", use_container_width=True,
