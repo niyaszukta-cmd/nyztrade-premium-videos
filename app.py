@@ -1,9 +1,9 @@
 """
 NYZTrade Premium Video Streaming Platform
+- OTP Login via Mobile Number (Twilio SMS)
 - Screenshot/Recording Prevention via CSS/JS overlays
 - HD Video Upload & Streaming
-- Token-based client access control
-- Watermarking per session
+- Dynamic Watermarking per session
 """
 
 import streamlit as st
@@ -11,13 +11,21 @@ import os
 import uuid
 import hashlib
 import json
+import random
 import time
 import base64
+import hmac
 from pathlib import Path
 from datetime import datetime, timedelta
-import hmac
 
-# ─── Page Config ────────────────────────────────────────────────────────────
+# ─── Twilio (graceful fallback to dev mode if not installed) ─────────────────
+try:
+    from twilio.rest import Client as TwilioClient
+    TWILIO_AVAILABLE = True
+except ImportError:
+    TWILIO_AVAILABLE = False
+
+# ─── Page Config ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="NYZTrade Premium",
     page_icon="🎬",
@@ -25,50 +33,42 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ─── Constants ───────────────────────────────────────────────────────────────
-VIDEO_DIR = Path("videos")
+# ─── Constants ────────────────────────────────────────────────────────────────
+VIDEO_DIR  = Path("videos")
 VIDEO_DIR.mkdir(exist_ok=True)
 USERS_FILE = Path("users.json")
 SECRET_KEY = os.environ.get("SECRET_KEY", "nyztrade-secret-2024")
 
-# ─── Anti-Capture CSS + JS ───────────────────────────────────────────────────
+# Twilio credentials – set as env vars OR Streamlit secrets
+def _secret(key, default=""):
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+TWILIO_SID   = os.environ.get("TWILIO_ACCOUNT_SID",  _secret("TWILIO_ACCOUNT_SID"))
+TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN",   _secret("TWILIO_AUTH_TOKEN"))
+TWILIO_FROM  = os.environ.get("TWILIO_PHONE_NUMBER", _secret("TWILIO_PHONE_NUMBER"))
+
+OTP_EXPIRY_SECONDS = 300   # 5 minutes
+OTP_MAX_ATTEMPTS   = 3
+
+# ─── Anti-Capture CSS + JS ────────────────────────────────────────────────────
 ANTI_CAPTURE_CSS_JS = """
 <style>
-  /* Disable text selection everywhere */
   * {
     -webkit-user-select: none !important;
     -moz-user-select: none !important;
     -ms-user-select: none !important;
     user-select: none !important;
   }
-
-  /* Disable pointer events on video to block right-click save */
   video {
     pointer-events: none !important;
     -webkit-user-drag: none !important;
   }
-
-  /* Invisible overlay blocks screenshot tools that grab DOM */
-  .video-protect-wrapper {
-    position: relative;
-    display: inline-block;
-    width: 100%;
-  }
-
-  .anti-capture-overlay {
-    position: absolute;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    z-index: 9999;
-    background: transparent;
-    pointer-events: none; /* allow click-through to controls below */
-  }
-
-  /* Watermark overlay */
   .watermark {
     position: fixed;
-    top: 50%;
-    left: 50%;
+    top: 50%; left: 50%;
     transform: translate(-50%, -50%) rotate(-30deg);
     font-size: 1.8rem;
     color: rgba(255,165,0,0.12);
@@ -78,96 +78,108 @@ ANTI_CAPTURE_CSS_JS = """
     white-space: nowrap;
     letter-spacing: 4px;
   }
-
-  /* Block DevTools detection visual cue */
-  body {
-    -webkit-touch-callout: none;
-  }
-
-  /* Hide Streamlit default menu and footer */
-  #MainMenu {visibility: hidden;}
-  footer {visibility: hidden;}
-  header {visibility: hidden;}
+  body { -webkit-touch-callout: none; }
+  #MainMenu { visibility: hidden; }
+  footer    { visibility: hidden; }
+  header    { visibility: hidden; }
 </style>
 
 <script>
 (function() {
-  // 1. Disable right-click context menu
-  document.addEventListener('contextmenu', function(e) {
-    e.preventDefault();
-    return false;
-  });
+  // Disable right-click
+  document.addEventListener('contextmenu', function(e) { e.preventDefault(); return false; });
 
-  // 2. Block PrintScreen, F12, Ctrl+Shift+I, Ctrl+U, Ctrl+S
+  // Block capture & devtools shortcuts
   document.addEventListener('keydown', function(e) {
-    const blocked = [
+    var blocked = [
       e.key === 'PrintScreen',
       e.key === 'F12',
       (e.ctrlKey && e.shiftKey && ['I','i','J','j','C','c'].includes(e.key)),
       (e.ctrlKey && ['u','U','s','S','p','P'].includes(e.key)),
       (e.metaKey && ['u','U','s','S','p','P'].includes(e.key)),
     ];
-    if (blocked.some(Boolean)) {
-      e.preventDefault();
-      e.stopPropagation();
-      return false;
-    }
+    if (blocked.some(Boolean)) { e.preventDefault(); e.stopPropagation(); return false; }
   });
 
-  // 3. Detect visibility change (tab switch / screen capture tools)
+  // Pause video on tab hide
   document.addEventListener('visibilitychange', function() {
-    if (document.hidden) {
-      var vids = document.querySelectorAll('video');
-      vids.forEach(function(v) { v.pause(); });
-    }
+    if (document.hidden) document.querySelectorAll('video').forEach(function(v){ v.pause(); });
   });
 
-  // 4. Detect DevTools open via window size heuristic
-  var devToolsCheck = function() {
-    var threshold = 160;
-    if (
-      window.outerWidth - window.innerWidth > threshold ||
-      window.outerHeight - window.innerHeight > threshold
-    ) {
+  // DevTools size heuristic
+  setInterval(function() {
+    if (window.outerWidth - window.innerWidth > 160 || window.outerHeight - window.innerHeight > 160) {
       document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0a0a0a;color:#ff4444;font-size:2rem;font-family:sans-serif;">🔒 Access Denied: Developer Tools Detected</div>';
     }
-  };
-  setInterval(devToolsCheck, 1500);
+  }, 1500);
 
-  // 5. Disable drag on all media
+  // Block drag on media
   document.addEventListener('dragstart', function(e) {
-    if (e.target.tagName === 'VIDEO' || e.target.tagName === 'IMG') {
-      e.preventDefault();
-    }
+    if (['VIDEO','IMG'].includes(e.target.tagName)) e.preventDefault();
   });
 })();
 </script>
 """
 
-# ─── Helper: Load / Save Users ───────────────────────────────────────────────
+# ─── OTP Helpers ─────────────────────────────────────────────────────────────
+
+def generate_otp():
+    return str(random.randint(100000, 999999))
+
+def send_otp_sms(phone: str, otp: str):
+    """Send OTP via Twilio. Returns (success: bool, message: str)."""
+    if not TWILIO_AVAILABLE:
+        return False, "twilio_not_installed"
+    if not all([TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM]):
+        return False, "twilio_not_configured"
+    try:
+        client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+        client.messages.create(
+            body=f"NYZTrade Premium: Your OTP is {otp}. Valid for 5 minutes. Do NOT share this code.",
+            from_=TWILIO_FROM,
+            to=phone
+        )
+        return True, "sent"
+    except Exception as e:
+        return False, str(e)
+
+def normalize_phone(phone: str) -> str:
+    """Convert any Indian/international format to E.164."""
+    p = phone.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if not p.startswith("+"):
+        if p.startswith("0"):
+            p = "+91" + p[1:]
+        elif len(p) == 10:
+            p = "+91" + p
+        else:
+            p = "+" + p
+    return p
+
+# ─── User Store ───────────────────────────────────────────────────────────────
+
 def load_users():
     if USERS_FILE.exists():
         with open(USERS_FILE) as f:
             return json.load(f)
-    # Default demo users
+    # Seed with demo accounts (replace with real numbers)
     default = {
-        "admin": {
-            "password_hash": hashlib.sha256("admin123".encode()).hexdigest(),
+        "+919876543210": {
             "role": "admin",
-            "name": "Admin",
-            "email": "admin@nyztrade.com"
+            "name": "Admin (Niyas)",
+            "email": "admin@nyztrade.com",
+            "active": True
         },
-        "premium1": {
-            "password_hash": hashlib.sha256("premium123".encode()).hexdigest(),
+        "+919876543211": {
             "role": "premium",
             "name": "Premium Client 1",
-            "email": "client1@example.com"
+            "email": "client1@example.com",
+            "active": True
         },
-        "premium2": {
-            "password_hash": hashlib.sha256("premium456".encode()).hexdigest(),
+        "+919876543212": {
             "role": "premium",
             "name": "Premium Client 2",
-            "email": "client2@example.com"
+            "email": "client2@example.com",
+            "active": True
         },
     }
     with open(USERS_FILE, "w") as f:
@@ -178,13 +190,8 @@ def save_users(users):
     with open(USERS_FILE, "w") as f:
         json.dump(users, f, indent=2)
 
-def verify_password(username, password, users):
-    if username not in users:
-        return False
-    h = hashlib.sha256(password.encode()).hexdigest()
-    return hmac.compare_digest(h, users[username]["password_hash"])
+# ─── Video Store ──────────────────────────────────────────────────────────────
 
-# ─── Helper: Video List ───────────────────────────────────────────────────────
 def get_video_list():
     meta_file = VIDEO_DIR / "metadata.json"
     if meta_file.exists():
@@ -197,76 +204,52 @@ def save_video_meta(meta):
     with open(meta_file, "w") as f:
         json.dump(meta, f, indent=2)
 
-# ─── Helper: Video to base64 for inline HTML5 player ─────────────────────────
 def get_video_b64(path: Path):
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
 
-def render_protected_video(video_path: Path, watermark_text: str, username: str):
-    """Render video with anti-capture overlay and dynamic watermark."""
-    ext = video_path.suffix.lower().lstrip(".")
-    mime_map = {"mp4": "video/mp4", "webm": "video/webm", "ogv": "video/ogg", "mov": "video/mp4"}
-    mime = mime_map.get(ext, "video/mp4")
+# ─── Protected Video Player ───────────────────────────────────────────────────
 
-    # Use file URL served by Streamlit static for large files
-    # For demo, embed as base64 (works for files < ~200MB reasonably)
-    b64 = get_video_b64(video_path)
-    src = f"data:{mime};base64,{b64}"
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+def render_protected_video(video_path: Path, watermark_text: str):
+    ext  = video_path.suffix.lower().lstrip(".")
+    mime = {"mp4":"video/mp4","webm":"video/webm","ogv":"video/ogg","mov":"video/mp4"}.get(ext,"video/mp4")
+    b64  = get_video_b64(video_path)
+    src  = f"data:{mime};base64,{b64}"
+    ts   = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     html = f"""
-    <div style="position:relative; width:100%;">
+    <div style="position:relative;width:100%;">
       <!-- Dynamic watermark -->
-      <div style="
-        position:absolute; top:50%; left:50%;
-        transform: translate(-50%,-50%) rotate(-25deg);
-        font-size:1.5rem; color:rgba(255,140,0,0.18);
-        font-weight:900; pointer-events:none; z-index:500;
-        white-space:nowrap; letter-spacing:3px; font-family:monospace;">
+      <div style="position:absolute;top:50%;left:50%;
+           transform:translate(-50%,-50%) rotate(-25deg);
+           font-size:1.4rem;color:rgba(255,140,0,0.18);
+           font-weight:900;pointer-events:none;z-index:500;
+           white-space:nowrap;letter-spacing:3px;font-family:monospace;">
         {watermark_text} &nbsp; {ts}
       </div>
-
-      <!-- Anti-capture transparent overlay (sits over video visually) -->
-      <div style="
-        position:absolute; top:0; left:0; width:100%; height:100%;
-        z-index:400; background:transparent; pointer-events:none;">
-      </div>
-
-      <!-- Video player -->
-      <video
-        id="nyztrade-player"
-        controls
+      <!-- Transparent anti-capture overlay -->
+      <div style="position:absolute;top:0;left:0;width:100%;height:100%;
+           z-index:400;background:transparent;pointer-events:none;"></div>
+      <!-- Player -->
+      <video id="nyztrade-player" controls
         controlsList="nodownload nofullscreen noremoteplayback"
-        disablePictureInPicture
-        disableRemotePlayback
-        style="width:100%; border-radius:8px; outline:none;"
-        oncontextmenu="return false;"
-      >
+        disablePictureInPicture disableRemotePlayback
+        style="width:100%;border-radius:8px;outline:none;"
+        oncontextmenu="return false;">
         <source src="{src}" type="{mime}">
         Your browser does not support HTML5 video.
       </video>
     </div>
-
     <script>
-    (function() {{
-      var player = document.getElementById('nyztrade-player');
-      if (!player) return;
-
-      // Disable download via attribute
-      player.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
-
-      // Pause on tab/window hide
-      document.addEventListener('visibilitychange', function() {{
-        if (document.hidden) player.pause();
-      }});
-
-      // Blur video on PrintScreen key
-      document.addEventListener('keyup', function(e) {{
-        if (e.key === 'PrintScreen') {{
-          player.pause();
-          player.style.filter = 'blur(20px)';
-          setTimeout(function() {{ player.style.filter = 'none'; }}, 3000);
+    (function(){{
+      var p = document.getElementById('nyztrade-player');
+      if (!p) return;
+      document.addEventListener('visibilitychange', function(){{ if(document.hidden) p.pause(); }});
+      document.addEventListener('keyup', function(e){{
+        if(e.key === 'PrintScreen'){{
+          p.pause();
+          p.style.filter = 'blur(20px)';
+          setTimeout(function(){{ p.style.filter='none'; }}, 3000);
         }}
       }});
     }})();
@@ -274,88 +257,217 @@ def render_protected_video(video_path: Path, watermark_text: str, username: str)
     """
     st.components.v1.html(html, height=500, scrolling=False)
 
-# ─── Login Screen ─────────────────────────────────────────────────────────────
+# ─── Login Screen (OTP Flow) ──────────────────────────────────────────────────
+
 def login_screen(users):
     st.markdown(ANTI_CAPTURE_CSS_JS, unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns([1, 1.4, 1])
+    col1, col2, col3 = st.columns([1, 1.3, 1])
     with col2:
         st.markdown("""
-        <div style='text-align:center; padding: 2rem 0 1rem 0;'>
-          <span style='font-size:2.8rem;'>🎬</span>
-          <h1 style='color:#FFA500; margin:0.3rem 0; font-size:1.8rem;'>NYZTrade Premium</h1>
-          <p style='color:#888; font-size:0.9rem;'>Exclusive Content for Premium Clients</p>
+        <div style='text-align:center;padding:2rem 0 1.2rem;'>
+          <span style='font-size:3rem;'>🎬</span>
+          <h1 style='color:#FFA500;margin:0.3rem 0;font-size:1.9rem;letter-spacing:1px;'>NYZTrade Premium</h1>
+          <p style='color:#555;font-size:0.85rem;margin:0;'>Exclusive Content for Verified Premium Clients</p>
         </div>
         """, unsafe_allow_html=True)
 
-        with st.form("login_form"):
-            username = st.text_input("Username", placeholder="Enter username")
-            password = st.text_input("Password", type="password", placeholder="Enter password")
-            submitted = st.form_submit_button("🔐 Login", use_container_width=True)
+        # ────────────────────────────────────────────────────────────
+        # STEP 1 — Phone Number Entry
+        # ────────────────────────────────────────────────────────────
+        if not st.session_state.get("otp_sent"):
 
-        if submitted:
-            if verify_password(username, password, users):
-                st.session_state["authenticated"] = True
-                st.session_state["username"] = username
-                st.session_state["role"] = users[username]["role"]
-                st.session_state["name"] = users[username]["name"]
-                st.session_state["session_id"] = str(uuid.uuid4())[:8].upper()
-                st.rerun()
-            else:
-                st.error("❌ Invalid credentials. Contact support.")
+            st.markdown("""
+            <div style="background:#111;border:1px solid #2a2a2a;border-radius:10px;
+                 padding:1.2rem 1.4rem;margin-bottom:1rem;">
+              <p style="color:#888;font-size:0.82rem;margin:0 0 0.8rem 0;">
+                📲 Enter your registered mobile number to receive a one-time password via SMS.
+              </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.form("phone_form"):
+                raw_phone = st.text_input(
+                    "📱 Mobile Number",
+                    placeholder="+91 98765 43210  or  9876543210",
+                    help="Number registered with NYZTrade Premium"
+                )
+                send_btn = st.form_submit_button("📨 Send OTP", use_container_width=True, type="primary")
+
+            if send_btn:
+                phone = normalize_phone(raw_phone) if raw_phone.strip() else ""
+                if len(phone) < 10:
+                    st.error("Please enter a valid mobile number.")
+                elif phone not in users:
+                    st.error("❌ Number not registered. Contact NYZTrade support.")
+                elif not users[phone].get("active", True):
+                    st.error("🚫 Account suspended. Contact NYZTrade support.")
+                else:
+                    otp  = generate_otp()
+                    sent, msg = send_otp_sms(phone, otp)
+
+                    st.session_state["otp_phone"]    = phone
+                    st.session_state["otp_code"]     = otp
+                    st.session_state["otp_sent_at"]  = time.time()
+                    st.session_state["otp_attempts"] = 0
+                    st.session_state["otp_sent"]     = True
+
+                    if sent:
+                        st.success(f"✅ OTP sent to {phone[:4]}****{phone[-3:]}. Valid for 5 minutes.")
+                    elif msg == "twilio_not_configured":
+                        st.warning("⚙️ **Dev Mode** — Twilio credentials not set.")
+                        st.info(f"🔑 OTP (dev only): **{otp}**")
+                    elif msg == "twilio_not_installed":
+                        st.warning("⚙️ **Dev Mode** — `twilio` package not installed.")
+                        st.info(f"🔑 OTP (dev only): **{otp}**")
+                    else:
+                        st.error(f"SMS failed: {msg}")
+                    st.rerun()
+
+        # ────────────────────────────────────────────────────────────
+        # STEP 2 — OTP Verification
+        # ────────────────────────────────────────────────────────────
+        else:
+            phone    = st.session_state["otp_phone"]
+            sent_at  = st.session_state["otp_sent_at"]
+            attempts = st.session_state.get("otp_attempts", 0)
+            elapsed  = time.time() - sent_at
+            remaining = max(0, int(OTP_EXPIRY_SECONDS - elapsed))
+            masked   = f"{phone[:4]}****{phone[-3:]}"
+
+            # Countdown bar
+            progress = remaining / OTP_EXPIRY_SECONDS
+            bar_color = "#FFA500" if progress > 0.4 else "#ff4444"
+            st.markdown(f"""
+            <div style="background:#111;border:1px solid #2a2a2a;border-radius:10px;
+                 padding:1rem 1.2rem;margin-bottom:0.8rem;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+                <span style="color:#888;font-size:0.82rem;">📨 OTP sent to <b style="color:#ccc;">{masked}</b></span>
+                <span style="color:{bar_color};font-weight:700;font-size:1rem;">⏱ {remaining}s</span>
+              </div>
+              <div style="background:#222;border-radius:4px;height:5px;">
+                <div style="background:{bar_color};width:{int(progress*100)}%;height:5px;border-radius:4px;
+                     transition:width 1s linear;"></div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if remaining == 0:
+                st.error("⏰ OTP expired.")
+                if st.button("🔄 Request New OTP", use_container_width=True, type="primary"):
+                    for k in ["otp_sent","otp_code","otp_sent_at","otp_attempts","otp_phone"]:
+                        st.session_state.pop(k, None)
+                    st.rerun()
+                return
+
+            if attempts >= OTP_MAX_ATTEMPTS:
+                st.error("🚫 Too many incorrect attempts. Request a new OTP.")
+                if st.button("🔄 Request New OTP", use_container_width=True, type="primary"):
+                    for k in ["otp_sent","otp_code","otp_sent_at","otp_attempts","otp_phone"]:
+                        st.session_state.pop(k, None)
+                    st.rerun()
+                return
+
+            st.markdown(f"#### 🔑 Enter 6-Digit OTP  &nbsp; <span style='color:#555;font-size:0.75rem;'>Attempt {attempts+1}/{OTP_MAX_ATTEMPTS}</span>", unsafe_allow_html=True)
+
+            with st.form("otp_form"):
+                entered_otp = st.text_input(
+                    "OTP",
+                    placeholder="• • • • • •",
+                    max_chars=6,
+                    label_visibility="collapsed"
+                )
+                verify_btn = st.form_submit_button("✅ Verify & Login", use_container_width=True, type="primary")
+
+            if verify_btn:
+                otp_clean = entered_otp.strip()
+                if not otp_clean.isdigit() or len(otp_clean) != 6:
+                    st.error("Please enter the 6-digit OTP received via SMS.")
+                elif hmac.compare_digest(otp_clean, st.session_state["otp_code"]):
+                    # ✅ Login successful
+                    user_info = users[phone]
+                    st.session_state["authenticated"] = True
+                    st.session_state["username"]      = phone
+                    st.session_state["role"]          = user_info["role"]
+                    st.session_state["name"]          = user_info["name"]
+                    st.session_state["session_id"]    = str(uuid.uuid4())[:8].upper()
+                    for k in ["otp_sent","otp_code","otp_sent_at","otp_attempts","otp_phone"]:
+                        st.session_state.pop(k, None)
+                    st.rerun()
+                else:
+                    st.session_state["otp_attempts"] = attempts + 1
+                    left = OTP_MAX_ATTEMPTS - attempts - 1
+                    st.error(f"❌ Incorrect OTP. {left} attempt(s) remaining.")
+
+            # Resend / Change number
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🔄 Resend OTP", use_container_width=True):
+                    new_otp = generate_otp()
+                    sent, msg = send_otp_sms(phone, new_otp)
+                    st.session_state.update({
+                        "otp_code": new_otp,
+                        "otp_sent_at": time.time(),
+                        "otp_attempts": 0
+                    })
+                    if sent:
+                        st.success("✅ New OTP sent!")
+                    elif msg in ("twilio_not_configured","twilio_not_installed"):
+                        st.warning("Dev Mode")
+                        st.info(f"🔑 New OTP: **{new_otp}**")
+                    else:
+                        st.error(f"SMS failed: {msg}")
+                    st.rerun()
+            with c2:
+                if st.button("← Change Number", use_container_width=True):
+                    for k in ["otp_sent","otp_code","otp_sent_at","otp_attempts","otp_phone"]:
+                        st.session_state.pop(k, None)
+                    st.rerun()
 
         st.markdown("""
-        <div style='text-align:center; margin-top:1.5rem; color:#555; font-size:0.8rem;'>
-          🔒 Protected Platform &nbsp;|&nbsp; © NYZTrade Analytics Pvt. Ltd.
+        <div style='text-align:center;margin-top:1.8rem;color:#333;font-size:0.72rem;'>
+          🔒 OTP-Secured &nbsp;|&nbsp; © NYZTrade Analytics Pvt. Ltd., Kerala
         </div>
         """, unsafe_allow_html=True)
 
 # ─── Admin Panel ──────────────────────────────────────────────────────────────
+
 def admin_panel(users):
     st.markdown("### 🛠️ Admin Panel")
+    tab1, tab2, tab3 = st.tabs(["📤 Upload Video", "🎬 Manage Videos", "👥 Manage Clients"])
 
-    tab1, tab2, tab3 = st.tabs(["📤 Upload Video", "🎬 Manage Videos", "👥 Manage Users"])
-
-    # ── Upload Tab ──
     with tab1:
         st.markdown("#### Upload HD Video")
-        title = st.text_input("Video Title", placeholder="e.g. Options Greeks Masterclass - Module 1")
-        description = st.text_area("Description", placeholder="Brief description of this video...", height=80)
-        category = st.selectbox("Category", ["Options Trading", "Stock Analysis", "ESG Investing", "Technical Analysis", "Fundamental Analysis", "General"])
-        thumbnail_url = st.text_input("Thumbnail URL (optional)", placeholder="https://...")
+        title       = st.text_input("Video Title", placeholder="Options Greeks Masterclass – Module 1")
+        description = st.text_area("Description", height=80)
+        category    = st.selectbox("Category", ["Options Trading","Stock Analysis","ESG Investing","Technical Analysis","Fundamental Analysis","General"])
+        thumbnail   = st.text_input("Thumbnail URL (optional)")
+        uploaded    = st.file_uploader("Upload HD Video", type=["mp4","webm","mov","mkv"],
+                                       help="MP4/WebM/MOV/MKV — HD/4K, up to 2 GB")
+        if uploaded and not title:
+            st.warning("⚠️ Please enter a **Video Title** above to enable the Save button.")
 
-        uploaded = st.file_uploader(
-            "Upload HD Video",
-            type=["mp4", "webm", "mov", "mkv"],
-            help="Supports MP4, WebM, MOV, MKV — HD/4K recommended"
-        )
-
-        if uploaded and title:
-            if st.button("💾 Save Video", use_container_width=True, type="primary"):
-                vid_id = str(uuid.uuid4())[:12]
-                ext = uploaded.name.split(".")[-1].lower()
+        if uploaded:
+            if st.button("💾 Save Video", use_container_width=True, type="primary", disabled=not title):
+                vid_id    = str(uuid.uuid4())[:12]
+                ext       = uploaded.name.split(".")[-1].lower()
                 save_path = VIDEO_DIR / f"{vid_id}.{ext}"
-
-                with st.spinner(f"Uploading {uploaded.name} ({uploaded.size / 1024 / 1024:.1f} MB)..."):
+                with st.spinner(f"Saving {uploaded.name} ({uploaded.size/1024/1024:.1f} MB)…"):
                     with open(save_path, "wb") as f:
                         f.write(uploaded.read())
-
                 meta = get_video_list()
                 meta[vid_id] = {
-                    "title": title,
-                    "description": description,
-                    "category": category,
+                    "title": title, "description": description, "category": category,
                     "filename": f"{vid_id}.{ext}",
-                    "size_mb": round(uploaded.size / 1024 / 1024, 2),
+                    "size_mb": round(uploaded.size/1024/1024, 2),
                     "uploaded_at": datetime.now().isoformat(),
-                    "thumbnail": thumbnail_url,
-                    "uploader": st.session_state["username"]
+                    "thumbnail": thumbnail,
+                    "uploader": st.session_state["name"]
                 }
                 save_video_meta(meta)
-                st.success(f"✅ '{title}' uploaded successfully! ({meta[vid_id]['size_mb']} MB)")
+                st.success(f"✅ '{title}' saved ({meta[vid_id]['size_mb']} MB)")
                 st.balloons()
 
-    # ── Manage Videos Tab ──
     with tab2:
         meta = get_video_list()
         if not meta:
@@ -363,151 +475,142 @@ def admin_panel(users):
         else:
             for vid_id, info in meta.items():
                 with st.expander(f"🎬 {info['title']} — {info['category']} ({info['size_mb']} MB)"):
-                    st.write(f"**Description:** {info.get('description','N/A')}")
-                    st.write(f"**Uploaded:** {info['uploaded_at'][:10]}  |  **By:** {info.get('uploader','admin')}")
-                    st.write(f"**File:** `{info['filename']}`")
-                    if st.button(f"🗑️ Delete", key=f"del_{vid_id}"):
+                    st.write(f"**Uploaded:** {info['uploaded_at'][:10]}  |  **By:** {info.get('uploader','')}")
+                    if st.button("🗑️ Delete", key=f"del_{vid_id}"):
                         fp = VIDEO_DIR / info["filename"]
-                        if fp.exists():
-                            fp.unlink()
+                        if fp.exists(): fp.unlink()
                         del meta[vid_id]
                         save_video_meta(meta)
                         st.success("Deleted.")
                         st.rerun()
 
-    # ── Manage Users Tab ──
     with tab3:
-        st.markdown("#### Current Users")
-        for uname, uinfo in users.items():
-            cols = st.columns([2, 1, 1, 1])
-            cols[0].write(f"**{uname}** ({uinfo.get('name','')})")
-            cols[1].write(uinfo["role"])
-            cols[2].write(uinfo.get("email", ""))
-
-        st.divider()
-        st.markdown("#### Add New Premium Client")
-        with st.form("add_user_form"):
-            new_user = st.text_input("Username")
-            new_pass = st.text_input("Password", type="password")
-            new_name = st.text_input("Full Name")
-            new_email = st.text_input("Email")
-            new_role = st.selectbox("Role", ["premium", "admin"])
-            add_btn = st.form_submit_button("➕ Add User")
-
-        if add_btn and new_user and new_pass:
-            if new_user in users:
-                st.error("Username already exists.")
-            else:
-                users[new_user] = {
-                    "password_hash": hashlib.sha256(new_pass.encode()).hexdigest(),
-                    "role": new_role,
-                    "name": new_name,
-                    "email": new_email
-                }
+        st.markdown("#### Registered Clients")
+        for phone, info in users.items():
+            cols = st.columns([2.5, 2, 2, 1, 1])
+            cols[0].write(f"**{info.get('name','')}**")
+            cols[1].write(phone)
+            cols[2].write(info.get("email",""))
+            cols[3].write("🛡️ Admin" if info["role"]=="admin" else "⭐ Premium")
+            status = info.get("active", True)
+            if cols[4].button("🔴 Suspend" if status else "🟢 Activate", key=f"tog_{phone}"):
+                users[phone]["active"] = not status
                 save_users(users)
-                st.success(f"✅ User '{new_user}' added.")
                 st.rerun()
 
-# ─── Premium Client View ──────────────────────────────────────────────────────
+        st.divider()
+        st.markdown("#### ➕ Add New Premium Client")
+        with st.form("add_client_form"):
+            new_phone = st.text_input("Mobile Number", placeholder="+91 98765 43210")
+            new_name  = st.text_input("Full Name")
+            new_email = st.text_input("Email")
+            new_role  = st.selectbox("Role", ["premium","admin"])
+            if st.form_submit_button("➕ Add Client"):
+                np = normalize_phone(new_phone) if new_phone.strip() else ""
+                if not np or len(np) < 10:
+                    st.error("Invalid number.")
+                elif np in users:
+                    st.error("Number already registered.")
+                else:
+                    users[np] = {"role":new_role,"name":new_name,"email":new_email,"active":True}
+                    save_users(users)
+                    st.success(f"✅ {new_name} ({np}) added.")
+                    st.rerun()
+
+# ─── Client Video View ────────────────────────────────────────────────────────
+
 def client_view():
-    meta = get_video_list()
-    username = st.session_state["username"]
+    meta       = get_video_list()
+    username   = st.session_state["username"]
     session_id = st.session_state.get("session_id", "DEMO")
-    watermark = f"NYZTrade | {username.upper()} | {session_id}"
+    wm         = f"NYZTrade | ****{username[-4:]} | {session_id}"
 
-    # Category filter
-    categories = list(set(v["category"] for v in meta.values())) if meta else []
+    categories   = list(set(v["category"] for v in meta.values())) if meta else []
     selected_cat = st.selectbox("📂 Filter by Category", ["All"] + sorted(categories))
-
-    filtered = {k: v for k, v in meta.items()
-                if selected_cat == "All" or v["category"] == selected_cat}
+    filtered     = {k:v for k,v in meta.items()
+                    if selected_cat == "All" or v["category"] == selected_cat}
 
     if not filtered:
         st.info("🎬 No videos available yet. Check back soon!")
         return
 
-    # Video grid
     cols = st.columns(3)
     for i, (vid_id, info) in enumerate(filtered.items()):
         with cols[i % 3]:
             thumb = info.get("thumbnail") or "https://via.placeholder.com/320x180/0a0a0a/FFA500?text=▶+NYZTrade"
             st.markdown(f"""
-            <div style="border:1px solid #333; border-radius:10px; padding:0.5rem; margin-bottom:0.5rem; background:#111;">
-              <img src="{thumb}" style="width:100%; border-radius:6px; height:120px; object-fit:cover;" />
-              <p style="color:#FFA500; font-weight:700; margin:0.4rem 0 0.1rem; font-size:0.85rem;">{info['title']}</p>
-              <p style="color:#666; font-size:0.72rem; margin:0;">{info['category']} &nbsp;|&nbsp; {info['size_mb']} MB</p>
+            <div style="border:1px solid #2a2a2a;border-radius:10px;padding:0.5rem;
+                 margin-bottom:0.5rem;background:#111;">
+              <img src="{thumb}" style="width:100%;border-radius:6px;height:120px;object-fit:cover;"/>
+              <p style="color:#FFA500;font-weight:700;margin:0.4rem 0 0.1rem;font-size:0.85rem;">{info['title']}</p>
+              <p style="color:#555;font-size:0.72rem;margin:0;">{info['category']} | {info['size_mb']} MB</p>
             </div>
             """, unsafe_allow_html=True)
             if st.button("▶ Watch", key=f"watch_{vid_id}", use_container_width=True):
                 st.session_state["active_video"] = vid_id
 
-    # Video player
     if "active_video" in st.session_state:
         vid_id = st.session_state["active_video"]
         if vid_id in meta:
-            info = meta[vid_id]
+            info       = meta[vid_id]
             video_path = VIDEO_DIR / info["filename"]
             st.divider()
             st.markdown(f"### 🎬 {info['title']}")
             st.caption(f"📁 {info['category']}  |  📅 {info['uploaded_at'][:10]}  |  📦 {info['size_mb']} MB")
-
             if video_path.exists():
-                with st.spinner("Loading protected stream..."):
-                    render_protected_video(video_path, watermark, username)
+                with st.spinner("Loading protected stream…"):
+                    render_protected_video(video_path, wm)
                 st.markdown(f"""
-                <div style="color:#444; font-size:0.7rem; text-align:center; margin-top:0.3rem;">
-                  🔒 This content is watermarked and protected. Session: {session_id} &nbsp;|&nbsp; User: {username.upper()}
-                </div>
-                """, unsafe_allow_html=True)
+                <div style="color:#333;font-size:0.7rem;text-align:center;margin-top:0.3rem;">
+                  🔒 Watermarked & Protected &nbsp;|&nbsp; Session: {session_id}
+                </div>""", unsafe_allow_html=True)
             else:
-                st.error("Video file not found. Please contact support.")
+                st.error("Video file not found. Contact support.")
 
-# ─── Main App ─────────────────────────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
 def main():
     users = load_users()
-
-    # Inject global anti-capture JS/CSS
     st.markdown(ANTI_CAPTURE_CSS_JS, unsafe_allow_html=True)
 
-    # Session guard
     if not st.session_state.get("authenticated"):
         login_screen(users)
         return
 
-    # Header
+    # App header
     st.markdown(f"""
-    <div style="display:flex; align-items:center; justify-content:space-between;
-         background:linear-gradient(90deg,#0a0a0a,#1a1a1a); padding:0.8rem 1.5rem;
-         border-bottom:2px solid #FFA500; margin-bottom:1rem; border-radius:0 0 8px 8px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;
+         background:linear-gradient(90deg,#0a0a0a,#181818);
+         padding:0.8rem 1.5rem;border-bottom:2px solid #FFA500;
+         margin-bottom:1rem;border-radius:0 0 8px 8px;">
       <div>
-        <span style="color:#FFA500; font-size:1.4rem; font-weight:900;">🎬 NYZTrade Premium</span>
-        <span style="color:#555; font-size:0.8rem; margin-left:1rem;">Exclusive Content Platform</span>
+        <span style="color:#FFA500;font-size:1.4rem;font-weight:900;">🎬 NYZTrade Premium</span>
+        <span style="color:#444;font-size:0.8rem;margin-left:1rem;">Exclusive Content Platform</span>
       </div>
-      <div style="color:#888; font-size:0.8rem; text-align:right;">
-        👤 {st.session_state['name']} &nbsp;|&nbsp;
+      <div style="color:#666;font-size:0.8rem;text-align:right;">
+        📱 ****{st.session_state['username'][-4:]} &nbsp;|&nbsp;
         <span style="color:#FFA500;">{'🛡️ ADMIN' if st.session_state['role']=='admin' else '⭐ PREMIUM'}</span>
+        &nbsp;|&nbsp; {st.session_state['name']}
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Logout
-    col_main, col_logout = st.columns([10, 1])
+    _, col_logout = st.columns([10, 1])
     with col_logout:
         if st.button("🚪 Exit"):
-            for key in ["authenticated", "username", "role", "name", "session_id", "active_video"]:
-                st.session_state.pop(key, None)
+            for k in ["authenticated","username","role","name","session_id","active_video"]:
+                st.session_state.pop(k, None)
             st.rerun()
 
-    # Role-based routing
     if st.session_state["role"] == "admin":
         admin_panel(users)
     else:
         client_view()
 
-    # Fixed watermark for logged-in users
+    # Fixed page watermark
     st.markdown(f"""
     <div class="watermark">
-      NYZTrade | {st.session_state.get('username','').upper()} | {st.session_state.get('session_id','')}
+      NYZTrade | ****{st.session_state.get('username','')[-4:]} | {st.session_state.get('session_id','')}
     </div>
     """, unsafe_allow_html=True)
 
