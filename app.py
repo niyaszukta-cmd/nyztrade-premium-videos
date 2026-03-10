@@ -462,27 +462,119 @@ def render_protected_video(embed_code: str, watermark_text: str):
     ts    = datetime.now().strftime("%d %b %Y %H:%M")
     clean = re.sub(r'width=["\'][^"\']*["\']',  'width="100%"',  embed_code.strip())
     clean = re.sub(r'height=["\'][^"\']*["\']', 'height="100%"', clean)
-    html = (
-        "<div class=\'nyz-bar nyz-top\'>"
-        "<span style=\'color:#64748b;font-size:0.68rem;\'>&#128274; Protected Stream &middot; VEED.io</span>"
-        "<span style=\'color:#f59e0b;font-size:0.68rem;font-family:Rajdhani,sans-serif;\'>"
-        + watermark_text + " | " + ts + "</span></div>"
-        "<div class=\'nyz-wrap\'>"
-        "<div class=\'nyz-wm\'>" + watermark_text + "</div>"
-        + clean +
-        "</div>"
-        "<div class=\'nyz-bar nyz-bot\'>"
-        "&#169; NYZTrade Analytics Pvt. Ltd. &nbsp;|&nbsp; Unauthorised recording is prohibited"
-        "</div>"
-        "<script>"
-        "document.addEventListener(\'keyup\',function(e){"
-        "if(e.key===\'PrintScreen\'){"
-        "var w=document.querySelector(\'.nyz-wrap\');"
-        "if(w){w.style.filter=\'blur(20px)\';setTimeout(function(){w.style.filter=\'none\';},3000);}}"
-        "});"
-        "</script>"
-    )
-    st.components.v1.html(html, height=520, scrolling=False)
+    wm    = watermark_text
+    cells = "".join(f'<div class="wc">{wm}</div>' for _ in range(12))
+
+    html = f"""<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#050c18;font-family:sans-serif}}
+.top{{background:#0a1526;border:1px solid #1e3a5f;border-bottom:none;
+  border-radius:14px 14px 0 0;padding:8px 16px;
+  display:flex;justify-content:space-between;align-items:center}}
+.top .l{{color:#64748b;font-size:.68rem}}
+.top .r{{color:#f59e0b;font-size:.68rem;font-family:monospace}}
+.wrap{{position:relative;width:100%;padding-bottom:56.25%;background:#000;
+  border:1px solid #1e3a5f;overflow:hidden}}
+.wrap iframe{{position:absolute;top:0;left:0;width:100%;height:100%;border:none}}
+/* watermark layers — always inside .wrap */
+.wm-centre{{position:absolute;inset:0;pointer-events:none;z-index:10;
+  display:flex;align-items:center;justify-content:center}}
+.wm-centre span{{color:rgba(245,158,11,.18);font-size:clamp(.75rem,2vw,1.1rem);
+  font-weight:900;letter-spacing:4px;white-space:nowrap;
+  transform:rotate(-25deg);font-family:Rajdhani,sans-serif;user-select:none}}
+.wm-grid{{position:absolute;inset:0;pointer-events:none;z-index:10;
+  display:grid;grid-template-columns:repeat(3,1fr);
+  grid-template-rows:repeat(4,1fr);overflow:hidden}}
+.wc{{display:flex;align-items:center;justify-content:center;
+  color:rgba(245,158,11,.09);font-size:clamp(.5rem,1.1vw,.8rem);
+  font-weight:800;white-space:nowrap;transform:rotate(-25deg);
+  font-family:Rajdhani,sans-serif;user-select:none;overflow:hidden}}
+.bot{{background:#0a1526;border:1px solid #1e3a5f;border-top:none;
+  border-radius:0 0 14px 14px;padding:6px 16px;
+  text-align:center;color:#1e3a5f;font-size:.62rem}}
+
+/* ── When .wrap itself enters fullscreen ── */
+.wrap:fullscreen,
+.wrap:-webkit-full-screen{{padding-bottom:0;height:100vh;width:100vw}}
+
+/* ── Fixed overlays injected onto <body> during fullscreen ── */
+.wm-fs{{position:fixed;inset:0;pointer-events:none;z-index:2147483647}}
+.wm-fs-centre{{display:flex;align-items:center;justify-content:center}}
+.wm-fs-centre span{{color:rgba(245,158,11,.22);font-size:clamp(.9rem,2.5vw,1.4rem);
+  font-weight:900;letter-spacing:4px;white-space:nowrap;
+  transform:rotate(-25deg);font-family:Rajdhani,sans-serif;user-select:none}}
+.wm-fs-grid{{display:grid;grid-template-columns:repeat(4,1fr);
+  grid-template-rows:repeat(4,1fr)}}
+.wm-fs-grid .wc{{color:rgba(245,158,11,.12);font-size:clamp(.55rem,1.2vw,.9rem)}}
+</style></head><body>
+<div class="top"><span class="l">&#128274; Protected · VEED.io</span>
+<span class="r">{wm} | {ts}</span></div>
+<div class="wrap" id="pw">
+  <div class="wm-grid" id="wg">{cells}</div>
+  <div class="wm-centre" id="wc"><span>{wm}</span></div>
+  {clean}
+</div>
+<div class="bot">&#169; NYZTrade Analytics Pvt. Ltd. &nbsp;|&nbsp; Unauthorised recording prohibited</div>
+
+<script>
+(function(){{
+  var WM="{wm}", TS="{ts}";
+  var fsGrid=null, fsCentre=null;
+
+  function makeFsOverlays(){{
+    var cells16="";
+    for(var i=0;i<16;i++) cells16+='<div class="wc">'+WM+'</div>';
+
+    fsGrid=document.createElement('div');
+    fsGrid.className='wm-fs wm-fs-grid';
+    fsGrid.innerHTML=cells16;
+
+    fsCentre=document.createElement('div');
+    fsCentre.className='wm-fs wm-fs-centre';
+    fsCentre.innerHTML='<span>'+WM+'</span>';
+  }}
+
+  function showFsOverlays(){{
+    if(!fsGrid) makeFsOverlays();
+    document.body.appendChild(fsGrid);
+    document.body.appendChild(fsCentre);
+  }}
+
+  function hideFsOverlays(){{
+    if(fsGrid   && fsGrid.parentNode)   fsGrid.parentNode.removeChild(fsGrid);
+    if(fsCentre && fsCentre.parentNode) fsCentre.parentNode.removeChild(fsCentre);
+  }}
+
+  function onFsChange(){{
+    var fe = document.fullscreenElement
+          || document.webkitFullscreenElement
+          || document.mozFullScreenElement
+          || document.msFullscreenElement;
+    if(fe) {{ showFsOverlays(); }}
+    else   {{ hideFsOverlays(); }}
+  }}
+
+  document.addEventListener('fullscreenchange',       onFsChange);
+  document.addEventListener('webkitfullscreenchange', onFsChange);
+  document.addEventListener('mozfullscreenchange',    onFsChange);
+  document.addEventListener('MSFullscreenChange',     onFsChange);
+
+  /* PrintScreen blur */
+  document.addEventListener('keyup', function(e){{
+    if(e.key==='PrintScreen'){{
+      var w=document.getElementById('pw');
+      if(w){{w.style.filter='blur(20px)';setTimeout(function(){{w.style.filter=''}},3000);}}
+    }}
+  }});
+
+  document.addEventListener('contextmenu', function(e){{e.preventDefault();}});
+  document.addEventListener('dragstart',   function(e){{e.preventDefault();}});
+}})();
+</script>
+</body></html>"""
+    st.components.v1.html(html, height=530, scrolling=False)
 
 # ─── Shared UI ────────────────────────────────────────────────────────────────
 def render_header():
