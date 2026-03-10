@@ -485,21 +485,26 @@ def render_protected_video(embed_code: str, watermark_text: str):
     clean = re.sub(r'height=["\'][^"\']*["\']', 'height="100%"', clean)
     wm    = watermark_text
     cells = "".join(f'<div class="wc">{wm}</div>' for _ in range(12))
+    fs_cells = "".join(f'<div class="wc">{wm}</div>' for _ in range(16))
 
     html = f"""<!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#050c18;font-family:sans-serif}}
-.top{{background:#0a1526;border:1px solid #1e3a5f;border-bottom:none;
-  border-radius:14px 14px 0 0;padding:8px 16px;
+html,body{{margin:0;padding:0;background:#050c18;font-family:sans-serif;
+  width:100%;height:100%;overflow:hidden}}
+/* Total layout: top-bar + video(fills remaining) + bot-bar = 100vh of iframe */
+.outer{{display:flex;flex-direction:column;width:100%;height:100vh}}
+.top{{flex:0 0 auto;background:#0a1526;border:1px solid #1e3a5f;
+  border-bottom:none;border-radius:14px 14px 0 0;padding:7px 14px;
   display:flex;justify-content:space-between;align-items:center}}
-.top .l{{color:#64748b;font-size:.68rem}}
-.top .r{{color:#f59e0b;font-size:.68rem;font-family:monospace}}
-.wrap{{position:relative;width:100%;padding-bottom:56.25%;background:#000;
-  border:1px solid #1e3a5f;overflow:hidden}}
+.top .l{{color:#64748b;font-size:.65rem}}
+.top .r{{color:#f59e0b;font-size:.65rem;font-family:monospace;letter-spacing:.3px}}
+/* Video fills all remaining height */
+.wrap{{flex:1 1 auto;position:relative;background:#000;
+  border-left:1px solid #1e3a5f;border-right:1px solid #1e3a5f;
+  overflow:hidden;min-height:0}}
 .wrap iframe{{position:absolute;top:0;left:0;width:100%;height:100%;border:none}}
-/* watermark layers — always inside .wrap */
+/* watermark layers */
 .wm-centre{{position:absolute;inset:0;pointer-events:none;z-index:10;
   display:flex;align-items:center;justify-content:center}}
 .wm-centre span{{color:rgba(245,158,11,.18);font-size:clamp(.75rem,2vw,1.1rem);
@@ -512,99 +517,72 @@ body{{background:#050c18;font-family:sans-serif}}
   color:rgba(245,158,11,.09);font-size:clamp(.5rem,1.1vw,.8rem);
   font-weight:800;white-space:nowrap;transform:rotate(-25deg);
   font-family:Rajdhani,sans-serif;user-select:none;overflow:hidden}}
-.bot{{background:#0a1526;border:1px solid #1e3a5f;border-top:none;
-  border-radius:0 0 14px 14px;padding:6px 16px;
-  text-align:center;color:#1e3a5f;font-size:.62rem}}
-
-/* ── When .wrap itself enters fullscreen ── */
-.wrap:fullscreen,
-.wrap:-webkit-full-screen{{padding-bottom:0;height:100vh;width:100vw}}
-
-/* ── Fixed overlays injected onto <body> during fullscreen ── */
+.bot{{flex:0 0 auto;background:#0a1526;border:1px solid #1e3a5f;
+  border-top:none;border-radius:0 0 14px 14px;padding:5px 14px;
+  text-align:center;color:#1e3a5f;font-size:.6rem}}
+/* fullscreen overlays */
 .wm-fs{{position:fixed;inset:0;pointer-events:none;z-index:2147483647}}
 .wm-fs-centre{{display:flex;align-items:center;justify-content:center}}
 .wm-fs-centre span{{color:rgba(245,158,11,.22);font-size:clamp(.9rem,2.5vw,1.4rem);
   font-weight:900;letter-spacing:4px;white-space:nowrap;
   transform:rotate(-25deg);font-family:Rajdhani,sans-serif;user-select:none}}
-.wm-fs-grid{{display:grid;grid-template-columns:repeat(4,1fr);
-  grid-template-rows:repeat(4,1fr)}}
+.wm-fs-grid{{display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:repeat(4,1fr)}}
 .wm-fs-grid .wc{{color:rgba(245,158,11,.12);font-size:clamp(.55rem,1.2vw,.9rem)}}
 </style></head><body>
-<div class="top"><span class="l">&#128274; Protected · VEED.io</span>
-<span class="r">{wm} | {ts}</span></div>
-<div class="wrap" id="pw">
-  <div class="wm-grid" id="wg">{cells}</div>
-  <div class="wm-centre" id="wc"><span>{wm}</span></div>
-  {clean}
+<div class="outer">
+  <div class="top">
+    <span class="l">&#128274; Protected · VEED.io</span>
+    <span class="r">{wm} | {ts}</span>
+  </div>
+  <div class="wrap" id="pw">
+    <div class="wm-grid" id="wg">{cells}</div>
+    <div class="wm-centre" id="wc2"><span>{wm}</span></div>
+    {clean}
+  </div>
+  <div class="bot">&#169; NYZTrade Analytics Pvt. Ltd. &nbsp;|&nbsp; Unauthorised recording prohibited</div>
 </div>
-<div class="bot">&#169; NYZTrade Analytics Pvt. Ltd. &nbsp;|&nbsp; Unauthorised recording prohibited</div>
-
 <script>
 (function(){{
-  var WM="{wm}", TS="{ts}";
-  var fsGrid=null, fsCentre=null;
+  var WM="{wm}";
+  var fsGrid=null,fsCentre=null;
 
   function makeFsOverlays(){{
-    var cells16="";
-    for(var i=0;i<16;i++) cells16+='<div class="wc">'+WM+'</div>';
-
+    var c="";for(var i=0;i<16;i++)c+='<div class="wc">'+WM+'</div>';
     fsGrid=document.createElement('div');
     fsGrid.className='wm-fs wm-fs-grid';
-    fsGrid.innerHTML=cells16;
-
+    fsGrid.innerHTML=c;
     fsCentre=document.createElement('div');
     fsCentre.className='wm-fs wm-fs-centre';
     fsCentre.innerHTML='<span>'+WM+'</span>';
   }}
-
-  function showFsOverlays(){{
-    if(!fsGrid) makeFsOverlays();
-    document.body.appendChild(fsGrid);
-    document.body.appendChild(fsCentre);
+  function showFs(){{if(!fsGrid)makeFsOverlays();document.body.appendChild(fsGrid);document.body.appendChild(fsCentre);}}
+  function hideFs(){{
+    if(fsGrid&&fsGrid.parentNode)fsGrid.parentNode.removeChild(fsGrid);
+    if(fsCentre&&fsCentre.parentNode)fsCentre.parentNode.removeChild(fsCentre);
   }}
-
-  function hideFsOverlays(){{
-    if(fsGrid   && fsGrid.parentNode)   fsGrid.parentNode.removeChild(fsGrid);
-    if(fsCentre && fsCentre.parentNode) fsCentre.parentNode.removeChild(fsCentre);
+  function onFs(){{
+    var fe=document.fullscreenElement||document.webkitFullscreenElement||
+           document.mozFullScreenElement||document.msFullscreenElement;
+    fe?showFs():hideFs();
   }}
+  ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange']
+    .forEach(function(ev){{document.addEventListener(ev,onFs);}});
 
-  function onFsChange(){{
-    var fe = document.fullscreenElement
-          || document.webkitFullscreenElement
-          || document.mozFullScreenElement
-          || document.msFullscreenElement;
-    if(fe) {{ showFsOverlays(); }}
-    else   {{ hideFsOverlays(); }}
-  }}
-
-  document.addEventListener('fullscreenchange',       onFsChange);
-  document.addEventListener('webkitfullscreenchange', onFsChange);
-  document.addEventListener('mozfullscreenchange',    onFsChange);
-  document.addEventListener('MSFullscreenChange',     onFsChange);
-
-  /* PrintScreen blur */
-  document.addEventListener('keyup', function(e){{
+  document.addEventListener('keyup',function(e){{
     if(e.key==='PrintScreen'){{
       var w=document.getElementById('pw');
       if(w){{w.style.filter='blur(20px)';setTimeout(function(){{w.style.filter=''}},3000);}}
     }}
   }});
-
-  document.addEventListener('contextmenu', function(e){{e.preventDefault();}});
-  document.addEventListener('dragstart',   function(e){{e.preventDefault();}});
-
-  /* Auto-resize: tell parent iframe our actual height */
-  function reportHeight() {{
-    var h = document.documentElement.scrollHeight || document.body.scrollHeight;
-    window.parent.postMessage({{type:'streamlit:setFrameHeight', height:h}}, '*');
-  }}
-  window.addEventListener('load', reportHeight);
-  window.addEventListener('resize', reportHeight);
-  setTimeout(reportHeight, 300);
+  document.addEventListener('contextmenu',function(e){{e.preventDefault();}});
+  document.addEventListener('dragstart',function(e){{e.preventDefault();}});
 }})();
 </script>
 </body></html>"""
-    st.components.v1.html(html, height=600, scrolling=False)
+
+    # Use 72vh of the typical laptop viewport (768px → ~553px)
+    # Capped at 520px so it always fits without the page needing to scroll
+    st.components.v1.html(html, height=480, scrolling=False)
 
 # ─── Shared UI ────────────────────────────────────────────────────────────────
 def render_header():
@@ -819,7 +797,42 @@ def client_view():
     session_id = st.session_state.get("session_id", "DEMO")
     watermark  = "NYZTrade | " + username.upper() + " | " + session_id
 
-    # ── Category filter ──
+    # ── PLAYER MODE: hide grid entirely, show only player ────────────────────
+    if "active_video" in st.session_state:
+        vid_id = st.session_state["active_video"]
+        if vid_id not in meta:
+            del st.session_state["active_video"]
+            st.rerun()
+            return
+        info = meta[vid_id]
+
+        # Compact header row: back button + title
+        col_back, col_title = st.columns([1, 5])
+        with col_back:
+            if st.button("\u2190  Back", key="close_player", use_container_width=True):
+                del st.session_state["active_video"]
+                st.rerun()
+        with col_title:
+            st.markdown(
+                '<div class="player-title" style="padding-top:6px">' + info["title"] + '</div>' +
+                '<div class="player-meta">' + info["category"] +
+                " &middot; " + info["uploaded_at"][:10] + '</div>',
+                unsafe_allow_html=True)
+
+        embed = info.get("embed_code", "").strip()
+        if embed:
+            render_protected_video(embed, watermark)
+        else:
+            st.error("\u26a0\ufe0f No embed code. Please contact admin.")
+
+        if info.get("description"):
+            st.markdown(
+                '<p style="color:#64748b;font-size:0.84rem;margin-top:0.5rem;line-height:1.6;">' +
+                info["description"] + '</p>',
+                unsafe_allow_html=True)
+        return   # ← exit here; grid never renders in player mode
+
+    # ── GRID MODE ─────────────────────────────────────────────────────────────
     categories   = sorted({v["category"] for v in meta.values()}) if meta else []
     selected_cat = st.selectbox("\U0001f4c2  Filter by Category", ["All"] + categories)
     filtered = {k: v for k, v in meta.items()
@@ -832,16 +845,14 @@ def client_view():
             unsafe_allow_html=True)
         return
 
-    # ── Responsive card grid via CSS grid (HTML) ──────────────────────────────
+    # Card grid HTML (CSS grid, responsive columns)
     cards_html = '<div class="vid-grid">'
     for vid_id, info in filtered.items():
         tb = info.get("thumb_b64", "").strip()
-        if tb:
-            thumb_html = '<img class="vid-thumb" src="' + tb + '" alt="thumb" loading="lazy" />' 
-        else:
-            thumb_html = '<div class="vid-thumb-placeholder">\u25b6</div>'
+        thumb_html = ('<img class="vid-thumb" src="' + tb + '" alt="thumb" loading="lazy" />'
+                      if tb else '<div class="vid-thumb-placeholder">\u25b6</div>')
         cards_html += (
-            '<div class="vid-card" id="card_' + vid_id + '">' +
+            '<div class="vid-card">' +
             thumb_html +
             '<div class="vid-card-inner">' +
             '<div class="vid-title">' + info["title"] + '</div>' +
@@ -852,8 +863,8 @@ def client_view():
     cards_html += '</div>'
     st.markdown(cards_html, unsafe_allow_html=True)
 
-    # ── One Watch button per card (Streamlit interactivity) ──
-    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
+    # Watch buttons (one per card, same responsive columns)
+    st.markdown('<div style="height:0.4rem"></div>', unsafe_allow_html=True)
     ncols = min(4, len(filtered))
     cols  = st.columns(ncols)
     for i, (vid_id, info) in enumerate(filtered.items()):
@@ -862,42 +873,6 @@ def client_view():
                          key="watch_" + vid_id, use_container_width=True):
                 st.session_state["active_video"] = vid_id
                 st.rerun()
-
-    # ── Active player ────────────────────────────────────────────────────────
-    if "active_video" in st.session_state:
-        vid_id = st.session_state["active_video"]
-        if vid_id not in meta:
-            del st.session_state["active_video"]
-            st.rerun()
-            return
-        info = meta[vid_id]
-        st.divider()
-
-        # Desktop: title left, close right; mobile: stacked
-        ct, cx = st.columns([5, 1])
-        with ct:
-            st.markdown(
-                '<div class="player-title">' + info["title"] + '</div>' +
-                '<div class="player-meta">' + info["category"] +
-                " &middot; " + info["uploaded_at"][:10] + '</div>',
-                unsafe_allow_html=True)
-        with cx:
-            if st.button("\u2716\ufe0f  Close", key="close_player", use_container_width=True):
-                del st.session_state["active_video"]
-                st.rerun()
-
-        embed = info.get("embed_code", "").strip()
-        if embed:
-            render_protected_video(embed, watermark)
-        else:
-            st.error("\u26a0\ufe0f No embed code. Please contact admin.")
-
-        # Description below player
-        if info.get("description"):
-            st.markdown(
-                '<p style="color:#64748b;font-size:0.85rem;margin-top:0.75rem;line-height:1.6;">' +
-                info["description"] + '</p>',
-                unsafe_allow_html=True)
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
